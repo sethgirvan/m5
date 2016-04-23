@@ -39,7 +39,7 @@
 
 // Manually calculated assuming NUM_THRUSTERS == 8. Update if any part of the
 // header changes! (32 bit CRC: ANSI X3.66 per VRCSR doc)
-#define PROPULSION_COMMAND_HEADER_CRC ((uint_fast32_t)0xDAE70014)
+#define PROPULSION_COMMAND_HEADER_CRC ((uint_fast32_t)0xDD8AC40D)
 
 // Manually calculated assuming R_ID == 0 (without final xor mask)
 #define CRC_POST_R_ID ((uint_fast32_t)0xEACEB963)
@@ -48,6 +48,8 @@
 // triple buffer coordinated with io_m5_tripbuf... functions
 static struct
 {
+	// If there are any gaps in the thruster enum, we will just waste the space
+	// for those indices to simplify sending the PROPLUSION_COMMAND
 	float power[NUM_THRUSTERS]; // Powers range [-1, 1]
 } m5[3];
 
@@ -116,7 +118,8 @@ static bool pack_power(unsigned char *c)
 			*c = PROPULSION_COMMAND_R_ID;
 		}
 
-		static uint32_t crc = CRC_POST_R_ID;
+		static uint32_t crc;
+		crc = CRC_POST_R_ID;
 
 		{
 			// We delay committing to power values as long as possible, so we

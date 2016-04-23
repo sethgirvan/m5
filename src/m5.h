@@ -13,14 +13,21 @@ extern "C" {
  */
 enum thruster
 {
-	VERT_FR,
-	VERT_FL,
-	VERT_BR,
-	VERT_BL,
-	SURGE_FR,
-	SURGE_FL,
-	SURGE_BR,
-	SURGE_BL,
+	// No motor ID 0, because with the firmwaree 0.9.8 that our thrusters came
+	// with, setting motor ID to 0 seemed to really mess up communications,
+	// probably due to a firmware bug.
+	//
+	// Since PROPULSION_COMMAND needs to output power values consecutively
+	// starting from motor ID 0, we will just be outputting unspecified power
+	// values for motor ID 0.
+	VERT_FR = 1,
+	VERT_FL = 2,
+	VERT_BR = 3,
+	VERT_BL = 4,
+	SURGE_FR = 5,
+	SURGE_FL = 6,
+	SURGE_BR = 7,
+	SURGE_BL = 8,
 	NUM_THRUSTERS
 };
 
