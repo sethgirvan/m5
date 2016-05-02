@@ -25,6 +25,7 @@ int main(int argc, char *argv[])
 
 	// zero powers
 	setpowers((float [NUM_THRUSTERS]){0.f});
+	m5_power_offer();
 
 	io_m5_trans_start(m5_power_trans);
 	for (float powers[NUM_THRUSTERS] = {0.f};;)
@@ -38,9 +39,16 @@ int main(int argc, char *argv[])
 		}
 		else if (ret == 2)
 		{
-			powers[t] = power;
-			setpowers(powers);
-			m5_power_offer();
+			if (t < NUM_THRUSTERS)
+			{
+				powers[t] = power;
+				setpowers(powers);
+				m5_power_offer();
+			}
+			else
+			{
+				DEBUG("Thruster number out of range");
+			}
 		}
 		else
 		{
