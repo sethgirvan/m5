@@ -10,9 +10,9 @@
 
 FILE *io_m5;
 
-static pthread_t thread_recv;
+static pthread_t thread_trans;
 
-static int (*handler_recv)();
+static int (*handler_trans)();
 
 
 void io_m5_init(char const *path)
@@ -32,12 +32,12 @@ void io_m5_clean()
 	return;
 }
 
-static void *m5_recv_thread(void *arg)
+static void *m5_trans_thread(void *arg)
 {
 	(void)arg;
 	for (;;)
 	{
-		if (handler_recv() == EOF && feof(io_m5))
+		if (handler_trans() == EOF && feof(io_m5))
 		{
 			return NULL;
 		}
@@ -46,13 +46,13 @@ static void *m5_recv_thread(void *arg)
 
 int io_m5_trans_start(int (*handler)())
 {
-	handler_recv = handler;
-	return pthread_create(&thread_recv, NULL, m5_recv_thread, NULL);
+	handler_trans = handler;
+	return pthread_create(&thread_trans, NULL, m5_trans_thread, NULL);
 }
 
 void io_m5_trans_stop()
 {
-	pthread_cancel(thread_recv);
+	pthread_cancel(thread_trans);
 	return;
 }
 
