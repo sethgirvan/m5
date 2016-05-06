@@ -5,6 +5,7 @@
 
 #include "io_m5.h"
 #include "macrodef.h"
+#include "dbg.h"
 
 
 FILE *io_m5;
@@ -18,6 +19,10 @@ void io_m5_init(char const *path)
 {
 	io_m5 = fopen(path, "r+");
 	// TODO: correctly handle termios
+	if (!io_m5)
+	{
+		DEBUG("Failed to open %s", path);
+	}
 	return;
 }
 
