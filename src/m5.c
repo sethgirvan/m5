@@ -189,16 +189,23 @@ int m5_power_trans()
 	bool finished_pack = pack_power(&c);
 	int ret = putc(c, io_m5) == EOF ? EOF : finished_pack;
 	fflush(io_m5);
+	if (finished_pack)
+	{
+		// Temporarily suspend transmission if and while there is no new data.
+		io_m5_trans_trywait();
+	}
 	return ret;
 }
 
 void m5_power(enum thruster t, float power)
 {
+	// -1.0 is full reverse and 1.0 full forward on the thrusters. I don't know
+	// how they respond to values outside that range.
 	assert(IN_RANGE(-1.f, power, 1.f));
 	m5[io_m5_tripbuf_write()].power[t] = power;
 }
 
-void m5_power_offer()
+void m5_power_offer_resume()
 {
-	io_m5_tripbuf_offer();
+	io_m5_tripbuf_offer_resume();
 }

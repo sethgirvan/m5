@@ -1,18 +1,26 @@
-#define _POSIX_C_SOURCE 1
+#define _POSIX_C_SOURCE 199309L
 #include <stdio.h>
 #include <pthread.h>
 #include <assert.h>
+#include <time.h>
 
 #include "io_m5.h"
 #include "macrodef.h"
 #include "dbg.h"
 
 
+#define WAIT_MILLI 500L
+
+
 FILE *io_m5;
 
-static pthread_t thread_trans;
-
-static int (*handler_trans)();
+static struct
+{
+	pthread_t thread;
+	int (*handler)();
+	bool handler_started;
+	pthread_cond_t data_avail;
+} trans = {.handler_started = false, .data_avail = PTHREAD_COND_INITIALIZER};
 
 
 void io_m5_init(char const *path)
@@ -37,22 +45,22 @@ static void *m5_trans_thread(void *arg)
 	(void)arg;
 	for (;;)
 	{
-		if (handler_trans() == EOF && feof(io_m5))
+		if (trans.handler() == EOF && feof(io_m5))
 		{
 			return NULL;
 		}
 	}
 }
 
-int io_m5_trans_start(int (*handler)())
+int io_m5_trans_set(int (*handler)())
 {
-	handler_trans = handler;
-	return pthread_create(&thread_trans, NULL, m5_trans_thread, NULL);
+	trans.handler = handler;
+	return 0;
 }
 
 void io_m5_trans_stop()
 {
-	pthread_cancel(thread_trans);
+	pthread_cancel(trans.thread);
 	return;
 }
 
@@ -89,7 +97,7 @@ bool io_m5_tripbuf_update()
 	return updated;
 }
 
-void io_m5_tripbuf_offer()
+void io_m5_tripbuf_offer_resume()
 {
 	pthread_mutex_lock(&tripbuf.lock);
 
@@ -101,7 +109,16 @@ void io_m5_tripbuf_offer()
 	tripbuf.clean = tmp;
 	tripbuf.new = true;
 
+	// Have a waiting trans.handler start transmitting new data immediately
+	pthread_cond_broadcast(&trans.data_avail);
 	pthread_mutex_unlock(&tripbuf.lock);
+
+	// Transmission handler gets started on first call
+	if (!trans.handler_started)
+	{
+		trans.handler_started = true;
+		pthread_create(&trans.thread, NULL, m5_trans_thread, NULL);
+	}
 }
 
 unsigned char io_m5_tripbuf_write()
@@ -112,4 +129,28 @@ unsigned char io_m5_tripbuf_write()
 unsigned char io_m5_tripbuf_read()
 {
 	return tripbuf.read;
+}
+
+void io_m5_trans_trywait()
+{
+	pthread_mutex_lock(&tripbuf.lock);
+
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+
+	ts.tv_sec += WAIT_MILLI / 1000;
+	ts.tv_nsec += WAIT_MILLI * 1000000L;
+	// normalize timespec
+	if (ts.tv_nsec > 1000000000L)
+	{
+		ts.tv_nsec -= 1000000000L;
+		ts.tv_sec += 1;
+	}
+	// ignore spurious wakeups
+	for (int rc = 0; !tripbuf.new && rc == 0;)
+	{
+		rc = pthread_cond_timedwait(&trans.data_avail, &tripbuf.lock, &ts);
+	}
+
+	pthread_mutex_unlock(&tripbuf.lock);
 }

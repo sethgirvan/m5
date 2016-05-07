@@ -29,11 +29,7 @@ int main(int argc, char *argv[])
 		DEBUG("Failed opening %s\n", argv[1]);
 	}
 
-	// zero powers
-	setpowers((float [NUM_THRUSTERS]){0.f});
-	m5_power_offer();
-
-	io_m5_trans_start(m5_power_trans);
+	io_m5_trans_set(m5_power_trans);
 	for (float powers[NUM_THRUSTERS] = {0.f};;)
 	{
 		unsigned int t;
@@ -49,7 +45,7 @@ int main(int argc, char *argv[])
 			{
 				powers[t] = power;
 				setpowers(powers);
-				m5_power_offer();
+				m5_power_offer_resume();
 			}
 			else
 			{

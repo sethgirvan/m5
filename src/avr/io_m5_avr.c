@@ -1,11 +1,16 @@
 /**
  * See the ahrs io_ahrs_avr.c file for more verbose commenting on dealing with
- * the avr usarts and interrupts
+ * the avr usarts and interrupts.
+ *
+ * Use is made of of atomic fences when memory ordering is desired relative to
+ * volatile access, but the standard seems to indicate atomic fences only
+ * preserve memory ordering relative to atomic type accesses.
  */
 
 #include <assert.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/atomic.h>
 
 #ifdef __STDC_NO_ATOMICS__
 #error "stdatomic.h unsupported. If necessary, use of stdatomic can be removed and it can be hacked together with volatile instead."
@@ -23,7 +28,71 @@
 #define NDP 0 // Pin number of line drive enable GPIO
 
 // baud: 115,200 per m5 manual
+// Note that at 16 Mhz clock frequency, the actual baud used by the avr is kind
+// of pushing the limit of baud inaccuracy, but it seems to work decently with
+// USE_2X set. setbaud.h will probably warn about this.
 #define BAUD 115200UL // used by util/setbaud.h
+
+// Timer to use for transmission handler pause timeout. Must be a 16 bit timer
+// (ie 1, 3, 4, 5) on the atmega2560
+#define NTIMER 3
+
+// Maximum pause of the transmission handler after calling io_m5_trans_trywait.
+#ifndef WAIT_MILL
+#define WAIT_MILLI 500ULL
+#endif
+
+// Maximize the resolution by choosing the lowest prescale value large enough
+// to for WAIT_MILL milliseconds of ticks to fit in 16 bits.
+
+#define PRESCALE_REG (1U << CC_XXX(CS, NTIMER, 0))
+#define PRESCALE 1ULL
+#define WAIT_TICKS (WAIT_MILLI * F_CPU + 1000ULL * PRESCALE / 2ULL) / \
+		(1000ULL * PRESCALE)
+
+#if WAIT_TICKS < 1ULL
+#warning "WAIT_MILLI less than minimum wait time."
+#undef WAIT_TICKS
+#define WAIT_TICKS 1ULL
+#endif
+
+#if WAIT_TICKS > (1ULL << 16)
+#undef PRESCALE_REG
+#define PRESCALE_REG (1U << CC_XXX(CS, NTIMER, 1))
+#undef PRESCALE
+#define PRESCALE 8ULL
+#endif
+
+#if WAIT_TICKS > (1ULL << 16)
+#undef PRESCALE_REG
+#define PRESCALE_REG ((1U << CC_XXX(CS, NTIMER, 0)) | \
+		(1U << CC_XXX(CS, NTIMER, 1)))
+#undef PRESCALE
+#define PRESCALE 64ULL
+#endif
+
+#if WAIT_TICKS > (1ULL << 16)
+#undef PRESCALE_REG
+#define PRESCALE_REG (1U << CC_XXX(CS, NTIMER, 2))
+#undef PRESCALE
+#define PRESCALE 256ULL
+#endif
+
+#if WAIT_TICKS > (1ULL << 16)
+#undef PRESCALE_REG
+#define PRESCALE_REG ((1U << CC_XXX(CS, NTIMER, 0)) | \
+		(1U << CC_XXX(CS, NTIMER, 2)))
+#undef PRESCALE
+#define PRESCALE 1024ULL
+#endif
+
+#if WAIT_TICKS > (1ULL << 16)
+#warning "WAIT_MILLI exceeds maximum wait time."
+#undef WAIT_TICKS
+#define WAIT_TICKS  (1ULL << 16)
+#endif
+
+#define WAIT_COUNT (WAIT_TICKS - 1ULL)
 
 
 // static int (*handler_m5_recv)();
@@ -85,7 +154,7 @@ static int uart_m5_getchar(FILE *stream)
 	unsigned char data = CC_XXX(UDR, NUSART, );
 
 	assert(!(status & (1U << CC_XXX(UPE, NUSART, ))) /* Parity Error. This
-	should never happen, since parity is supposed to be disabled?! */);
+	should never happen, since parity is supposed to be disabled. */);
 
 	if (status & (1U << CC_XXX(FE, NUSART, ))) // was stop bit incorrect (zero)?
 	{
@@ -111,6 +180,34 @@ FILE *io_m5 = &(FILE)FDEV_SETUP_STREAM(uart_m5_putchar, uart_m5_getchar,
 		_FDEV_SETUP_RW);
 
 
+static void timer_init()
+{
+	// We want the default, Waveform Generation Mode 0 (Normal)
+	//
+	// CTC mode could be used too, but normal mode is fine since we will always
+	// stop the timer on compare match anyway.
+	assert(!(
+				(CC_XXX(TCCR, NTIMER, A) &
+					((1U << CC_XXX(WGM, NTIMER, 0)) |
+					(1U << CC_XXX(WGM, NTIMER, 1)))) ||
+				(CC_XXX(TCCR, NTIMER, B) &
+					((1U << CC_XXX(WGM, NTIMER, 2)) |
+					(1U << CC_XXX(WGM, NTIMER, 3))))));
+
+	// The timer should be disabled
+	assert(!(
+				CC_XXX(TCCR, NTIMER, B) &
+					((1U << CC_XXX(CS, NTIMER, 0)) |
+					(1U << CC_XXX(CS, NTIMER, 1)) |
+					(1U << CC_XXX(CS, NTIMER, 2)))));
+
+	// Set the compare value that will get the desired time. This only needs to
+	// be set once, whereas the prescale value is set every time the timer is
+	// enabled because the same bits also enable/disable the timer.
+	CC_XXX(OCR, NTIMER, A) = WAIT_COUNT;
+	return;
+}
+
 /**
  * Assumes uart NUSART and pin NDP on port DP_PORT will be connected to a
  * ttl<->RS-485 converter connected to the m5's RS-485 interface.
@@ -121,11 +218,8 @@ FILE *io_m5 = &(FILE)FDEV_SETUP_STREAM(uart_m5_putchar, uart_m5_getchar,
  *     Parity: none
  *     Baud: BAUD
  */
-void io_m5_init(char const *path)
+static void rs485_init()
 {
-	(void)path;
-	sei(); // enable global interrupts (they may be already enabled anyway)
-
 	// set line drive enable pin to output
 	CC_XXX(DDR, DP_PORT, ) |= (1U << CC_XXX(DD, DP_PORT, NDP));
 #include <util/setbaud.h> // uses BAUD macro
@@ -142,6 +236,15 @@ void io_m5_init(char const *path)
 	return;
 }
 
+void io_m5_init(char const *path)
+{
+	(void)path;
+	sei(); // enable global interrupts (they may be already enabled anyway)
+	rs485_init();
+	timer_init();
+	return;
+}
+
 void io_m5_clean()
 {
 	// TODO: disable transmit and receive
@@ -151,25 +254,25 @@ void io_m5_clean()
 // ISR(CC_XXX(USART, NUSART, _RX_vect)) // Receive Complete Interrupt
 // {
 // 	assert(handler_m5_recv /* m5 usart receive handler should not be NULL */);
-// 
+//
 // 	// This function must read from the UDR (eg, with 'fgetc(io_m5)'),
 // 	// clearing the RXC flag, otherwise this interrupt will keep triggering
 // 	// until the flag is cleared.
 // 	handler_m5_recv();
 // }
-// 
+//
 // int io_m5_recv_start(int (*handler)())
 // {
 // 	handler_m5_recv = handler;
-// 
+//
 // 	// Try to ensure that memory ops (such as setting handler_m5_recv) are not
 // 	// ordered after enabling the interrupt.
 // 	atomic_signal_fence(memory_order_acq_rel);
-// 
+//
 // 	CC_XXX(UCSR, NUSART, B) |= (1U << CC_XXX(RXCIE, NUSART, )); // enable Receive Complete Interrupt
 // 	return 0;
 // }
-// 
+//
 // void io_m5_recv_stop()
 // {
 // 	CC_XXX(UCSR, NUSART, B) &= ~(1U << CC_XXX(RXCIE, NUSART, )); // disable Receive Complete Interrupt
@@ -184,20 +287,18 @@ ISR(CC_XXX(USART, NUSART, _UDRE_vect)) // Data Register empty Interrupt
 							   be NULL */);
 
 		// This function must write to the UDR (eg, with 'putc(byte, io_m5)'),
-		// clearing the UDRE flag, otherwise the interrupts will keep
+		// clearing the UDRE flag, otherwise this interrupt will keep
 		// triggering until the flag is cleared.
 		handler_m5_trans();
 }
 
-int io_m5_trans_start(int (*handler)())
+int io_m5_trans_set(int (*handler)())
 {
 	handler_m5_trans = handler;
 
-	// Try to prevent memory ops ordered after enabling interrupt
-	atomic_signal_fence(memory_order_acq_rel);
+	// USART Data Register Empty Interrupt isn't enabled here. It will be
+	// enabled when io_m5_tripbuf_offer_resume is called
 
-	// enable USART Data Register Empty Interrupt
-	CC_XXX(UCSR, NUSART, B) |= (1U << CC_XXX(UDRIE, NUSART, ));
 	return 0;
 }
 
@@ -236,6 +337,9 @@ static void tripbuf_offer_crit()
 
 	// Try to ensure buffer writes are ordered correctly
 	atomic_signal_fence(memory_order_release);
+
+	// Make the current write available as clean, and use clean as the new
+	// write.
 	unsigned char tmp = tripbuf.write;
 	tripbuf.write = tripbuf.clean;
 	tripbuf.clean = tmp;
@@ -245,25 +349,35 @@ static void tripbuf_offer_crit()
 
 /**
  * May be interrupted by io_m5_tripbuf_update, but must not interrupt it.
+ *
+ * Always leaves the USART Data Register Empty Interrupt Enabled.
  */
-void io_m5_tripbuf_offer()
+void io_m5_tripbuf_offer_resume()
 {
-	if (CC_XXX(UCSR, NUSART, B) & (1U << CC_XXX(UDRIE, NUSART, )))
+	// Data Register Empty Interrupt and Output Compare Match A Interrupt need
+	// to be disabled atomically because they may cyclically enable each other.
+	ATOMIC_BLOCK(ATOMIC_FORCEON)
 	{
 		// Disable Data Register Empty Interrupt, because we assume that if it
 		// is enabled, io_m5_tripbuf_udpate may be called from the ISR.
 		CC_XXX(UCSR, NUSART, B) &= ~(1U << CC_XXX(UDRIE, NUSART, ));
-		tripbuf_offer_crit();
-		CC_XXX(UCSR, NUSART, B) |= (1U << CC_XXX(UDRIE, NUSART, ));
-		return;
+		// Disable Output Compare Match Interrupt because the Data Register
+		// Empty Interrupt will be enabled immediately here instead (and we
+		// don't want it being enabled during tripbuf_offer_crit).
+		CC_XXX(TIMSK, NTIMER, ) &= ~(1U << CC_XXX(OCIE, NTIMER, A));
 	}
+	// Disable the timer. This is probably not strictly necessary.
+	CC_XXX(TCCR, NTIMER, B) &= ~((1U << CC_XXX(CS, NTIMER, 0)) |
+			(1U << CC_XXX(CS, NTIMER, 1)) | (1U << CC_XXX(CS, NTIMER, 2)));
+
 	tripbuf_offer_crit();
+	// Enable the Data Register Empty Interrupt. If it was disabled when we
+	// were called, that should only be because it was 'paused' from by
+	// io_m5_trans_trywait (or first time we were called).
+	CC_XXX(UCSR, NUSART, B) |= (1U << CC_XXX(UDRIE, NUSART, ));
 	return;
 }
 
-/**
- * returns whether there has been any new data since last call
- */
 bool io_m5_tripbuf_update()
 {
 	assert(IN_RANGE(0, tripbuf.write, 2) && IN_RANGE(0, tripbuf.clean, 2) &&
@@ -292,4 +406,65 @@ unsigned char io_m5_tripbuf_write()
 unsigned char io_m5_tripbuf_read()
 {
 	return tripbuf.read;
+}
+
+ISR(CC_XXX(TIMER, NTIMER, _COMPA_vect))
+{
+	assert(!tripbuf.new /* This interrupt should never be enabled when tripbuf.new == true */);
+
+	// Disable this interrupt. Stopping and setting the timer to 0 wouldn't be
+	// enough because the Output Compare Register may equal 0.
+	CC_XXX(TIMSK, NTIMER, ) &= ~(1U << CC_XXX(OCIE, NTIMER, A));
+
+	// Disable the timer. This is probably not strictly necessary.
+	CC_XXX(TCCR, NTIMER, B) &= ~((1U << CC_XXX(CS, NTIMER, 0)) |
+			(1U << CC_XXX(CS, NTIMER, 1)) | (1U << CC_XXX(CS, NTIMER, 2)));
+
+	// Enable USART Data Register Empty Interrupt, resuming handler_m5_trans.
+	// It will probably trigger as immediately as possible since the Data
+	// Register Empty bit will likely be set if the wait time was reasonably
+	// long.
+	CC_XXX(UCSR, NUSART, B) |= (1U << CC_XXX(UDRIE, NUSART, ));
+}
+
+/**
+ * Should only be called from handler_m5_trans.
+ */
+void io_m5_trans_trywait()
+{
+	// The Output Compare Interrupt should be disabled when called
+	assert(!(CC_XXX(TIMSK, NTIMER, ) & (1U << CC_XXX(OCIE, NTIMER, A))));
+
+	// The timer should be disabled when called
+	assert(!(
+				CC_XXX(TCCR, NTIMER, B) &
+					((1U << CC_XXX(CS, NTIMER, 0)) |
+					(1U << CC_XXX(CS, NTIMER, 1)) |
+					(1U << CC_XXX(CS, NTIMER, 2)))));
+
+	// Accessing tripbuf is safe because this function must not be
+	// interruptible by io_m5_tripbuf_offer.
+	if (tripbuf.new)
+	{
+		// Don't wait at all since there is new data to send.
+		return;
+	}
+
+	// Disable the USART Data Register Empty Interrupt, pausing
+	// handler_m5_trans. It will be reenabled when either the Output Compare
+	// Match Interrupt triggers after the specified time or
+	// io_m5_tripbuf_offer_resume is called, whichever is first.
+	CC_XXX(UCSR, NUSART, B) &= ~(1U << CC_XXX(UDRIE, NUSART, ));
+	// Clear timer (we assume it may have whatever value from when it was
+	// stopped)
+	CC_XXX(TCNT, NTIMER, ) = 0;
+	// Enable timer: Use internal clock with necessary prescaling level
+	CC_XXX(TCCR, NTIMER, B) |= PRESCALE_REG;
+
+	// If an output compare match occurs here, it will still trigger an
+	// interrupt after the Output Compare Match Interrupt is enabled.
+
+	// Enable Output Compare Match Interrupt
+	CC_XXX(TIMSK, NTIMER, ) |= (1U << CC_XXX(OCIE, NTIMER, A));
+	return;
 }
